@@ -1,58 +1,162 @@
-基于Python 2.7.X 封装实现一个可重用的类，具体要求如下：
-1. 该类能读取Lua table构造式（Lua 5.2.X）定义的数据，并以Python字典的方式读写数据
-2. 给定一个Python字典，可以更新类中的数据，并以Lua table构造式输出
-3. 遵循Lua table构造式定义确保相同的同构数据源彼此转换后数据仍然一致
-4. 支持将数据分别以Lua table格式存储到文件并加载回来使用
-5. 只允许使用Python内置模块（如sys、math）和string模块，不允许使用其他标准模块及任何第三方开发库（包括但不限于re）
-6. 独立完成作业，并附带测试代码及一份简短的模块使用说明
+-------------------------------------------
 
-注意：
-为简便考虑，Lua table中下标只有数字和字符串两种类型，值只有（nil，布尔，数字，字符串，table）5种类型；并且全部字符串都是ANSI编码。
-如果lua table中出现"[key]=value"则一律转换为python中的dict，否则转换为python中的list。
-对于lua table中出现的nil，如果该table是list，nil就要转换为None；如果是dict，value为nil的对应到python dict中就忽略这个（key，value）pair
+本次项目主要包含4个模块: annotation, escape, luastring 和 PyLuaTblParser.
 
-基本要求：
-提交Python代码文件名为PyLuaTblParser.py, 测试代码和文档可以打一个包作为第二个附件提交
-PyLuaTblParser.py 中包含一个class，类名为PyLuaTblParser，类中包含以下方法：
-1. load(self, s)    读取Lua table数据，输入s为一个符合Lua table定义的字符串，无返回值；若遇到Lua table格式错误的应该抛出异常；
-2. dump(self)  根据类中数据返回Lua table字符串
-3. loadLuaTable(self, f)  从文件中读取Lua table字符串，f为文件路径，异常处理同1，文件操作失败抛出异常；
-4. dumpLuaTable(self, f) 将类中的内容以Lua table格式存入文件，f为文件路径，文件若存在则覆盖，文件操作失败抛出异常；
-5. loadDict(self, d)   读取dict中的数据，存入类中，只处理数字和字符串两种类型的key，其他类型的key直接忽略；
-6. dumpDict(self)  返回一个dict，包含类中的数据
-做5和6的操作时，注意不要直接引用输入参数d，也不要返回类中内置的字典的引用
+-------------------------------------------
 
-进阶要求：
-1. PyLuaTblParser类支持用[]进行赋值、读写数据的操作，类似字典
-2. PyLuaTblParser类包含update(self, d)用字典d更新类中的数据，类似于字典的update
+## Load 函数整体思路:
+1. 首先清洗字符串, 包括
+     1.1 \r\n转\n
+     1.2 去除注释
+     1.3 去除空格, 制表符和换行
+2. 每一个table使用一个list和一个dict保存, 退出table的时候将list和dict进行合并
+3. 使用两个指针left和right遍历整个字符串, left代表还未处理的字符串最左边, right代表当前字符, 对right进行条件判断, 如
+     3.1 遇到'{', 说明遇到了一个新的table, 我们使用栈保存上下文, 包括key, list和dict
+     3.2 遇到'}', 说明当前table结束, 我们从栈中取出父table, 将当前table加入父table中
+     3.3 遇到'=', 说明前面我们遇到了一个key
+     3.4 遇到',', 说明前面我们遇到了一个value, 如果前面有key, 我们将之加入dict, 否则加入list
+     3.5 遇到'\"'或者'\'', 说明一个字符串的开始或者结束, 需要记录该状态, 因为在字符串状态下, 以上的字符都无效
+     3.6 遇到'\\', 说明遇到字符串中的转移符号, 需要多读一个字符
 
-基本测试方法：
-a1 = PyLuaTblParser()
-a2 = PyLuaTblParser()
-a3 = PyLuaTblParser()
 
-test_str = '{array = {65,23,5,},dict = {mixed = {43,54.33,false,9,string = "value",},array = {3,6,4,},string = "value",},}'
-a1.load(test_str)
-d1 = a1.dumpDict()
+## 一些注意事项:
+1. 读入字符串需要转义, 输出字符串需要反转义
+2. 对于boolean型变量, 不能直接用value == True来判定, 因为如果value是1等式也成立, 需要用isinstance(value, bool) and value == True来判定
+3. 对于{a = 1}这样的测试用例, 我们需要判断a是不是一个合法的标识符
 
-a2.loadDict(d1)
-a2.dumpLuaTable(file_path)
-a3.loadLuaTable(file_path)
 
-d3 = a3.dumpDict()
+-------------------------------------------
+## annotation模块
+     1. remove_annotation 函数
+          * 作用: 去除注释, 包括单行注释(--), 多行注释(--[[]]) 和 多行注释(--[==[]==])
+          * 实现: 10状态自动机
+          * 注意事项: '--' 出现在字符串中注释无效, 如 a = "-- this is not an annotation"
 
-附：test_str对应的Python dict：
-{
-     "array": [65, 23, 5],
-     "dict": {
-          "mixed": {
-               1: 43,
-               2: 54.33,
-               3: false,
-               4: 9
-               "string": "value"
-          },
-          "array": [3, 6, 4],
-          "string": "value"
-     }
-}
+     2. remove_space 函数
+          * 作用: 去除空格,制表符和换行
+          * 实现: 循环迭代, 同时维护是否处于字符串中的状态
+          * 注意事项: 字符串中的空格,制表符和换行不能去除
+
+
+-------------------------------------------
+## escape 模块
+     1. escape 函数
+          * 作用: 转义, 如将'\t'转换为'\\t'
+          * 实现: 循环迭代
+          * 注意事项: 无
+
+     2. unescape 函数
+          * 作用: 反转义, 如将'\\t'转换为'\t'
+          * 实现: 循环迭代
+          * 注意事项: 无
+
+     3. win2linux 函数
+          * 作用: 将windows平台上的换行符('\r\n')变为linux平台下的换行符('\n')
+          * 实现: 替换
+          * 注意事项: 无
+
+
+-------------------------------------------
+## luastring 模块
+     1. str2number 函数
+          * 作用: 将字符串转化为数字, 失败时返回None
+          * 实现: python中int()和float()函数
+          * 注意事项: 无
+
+     2. is_number 函数
+          * 作用: 判断一个字符串是不是数字
+          * 实现: python中int()和float()函数
+          * 注意事项: 无
+
+     3. is_letter 函数
+          * 作用: 判断一个字符是不是字母
+          * 实现: 比较
+          * 注意事项: 无
+
+     3. is_digit 函数
+          * 作用: 判断一个字符是不是数字
+          * 实现: 比较
+          * 注意事项: 无
+
+     3. is_identifier 函数
+          * 作用: 判断一个字符串是不是标识符
+          * 实现: 迭代比较
+          * 注意事项: 开头不能是数字
+
+
+-------------------------------------------
+## PyLuaTblParser 模块
+     1. decode_key 函数
+          * 作用: 解码key, 比如["a"] => a, ['a'] => a, [1] => 1, a => a
+          * 实现: 无
+          * 注意事项: 需要反转义
+
+     2. encode_key 函数
+          * 作用: 编码key, 比如a => ["a"]
+          * 实现: 无
+          * 注意事项: 需要转义
+
+     3. decode_value 函数
+          * 作用: 解码value, 比如"a" => a, 1 => 1
+          * 实现: 无
+          * 注意事项: 需要反转义
+
+     4. encode_value 函数
+          * 作用: 编码value, 比如a => "a", 1 => 1
+          * 实现: 无
+          * 注意事项: 需要转义
+
+     5. _load 函数 (**** CORE ****)
+          * 作用: 读入一个字符串进行解析, 返回dict或者list
+          * 实现: 见整体思路
+          * 注意事项: 见整体思路
+
+     6. load 函数
+          * 作用: 读取Lua table数据, 输入s为一个符合Lua table定义的字符串, 无返回值; 若遇到Lua table格式错误的应该抛出异常
+          * 实现: 调用_load函数
+          * 注意事项: 无
+
+     7. _dump 函数
+          * 作用: 输出dict或者list
+          * 实现: 递归
+          * 注意事项: 字符串需要进行转义
+
+     8. dump 函数
+          * 作用: 根据类中数据返回Lua table字符串
+          * 实现: 调用_dump函数
+          * 注意事项: 无
+
+     9. loadLuaTable 函数
+          * 作用: 从文件中读取Lua table字符串, 文件操作失败抛出异常
+          * 实现: python读文件, 调用load
+          * 注意事项: 需要close
+
+     10. dumpLuaTable 函数
+          * 作用: 将类中的内容以Lua table格式存入文件, 文件若存在则覆盖, 文件操作失败抛出异常
+          * 实现: python写文件, 调用dump
+          * 注意事项: 需要close
+
+     11. loadDict 函数
+          * 作用: 读取dict中的数据, 存入类中, 只处理数字和字符串两种类型的key, 其他类型的key直接忽略
+          * 实现: 先调用_dump变成字符串, 然后调用load载入该字符串
+          * 注意事项: 不能直接复制(浅拷贝)
+
+     12. dumpDict 函数
+          * 作用: 返回一个dict, 包含类中的数据
+          * 实现: 先调用dump变成字符串，然后调用_load载入该字符串
+          * 注意事项: 不能直接复制(浅拷贝)
+
+     13. __getitem__ 函数
+          * 作用: 支持用[]进行赋值/读写数据的操作, 类似字典
+          * 实现: 操作符重载
+          * 注意事项: 无
+
+     14. update 函数
+          * 作用: 用字典d更新类中的数据, 类似于字典的update
+          * 实现: 无
+          * 注意事项: key只保留数字和字符串
+
+
+
+
+
